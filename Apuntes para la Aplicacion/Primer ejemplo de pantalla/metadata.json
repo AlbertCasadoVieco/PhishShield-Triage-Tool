@@ -1,5 +1,0 @@
-{
-  "name": "PhishShield Threat Analyzer",
-  "description": "A high-fidelity tactical dashboard for analyzing suspicious emails, headers, and URLs.",
-  "requestFramePermissions": []
-}
