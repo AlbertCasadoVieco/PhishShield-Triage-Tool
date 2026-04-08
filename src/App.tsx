@@ -23,6 +23,9 @@ import { AnalysisRecord, WhitelistEntry, Verdict } from './types';
 import { MOCK_HISTORY, MOCK_WHITELIST } from './constants';
 
 const parsePayload = (headers: string, body: string, whitelists: WhitelistEntry[]) => {
+  const triggers: string[] = [];
+  let score = 0;
+
   const extractHeader = (rgx: RegExp) => {
     const match = headers.match(rgx);
     return match ? match[1].trim() : 'Unknown';
@@ -30,6 +33,7 @@ const parsePayload = (headers: string, body: string, whitelists: WhitelistEntry[
 
   const fromRaw = extractHeader(/^From:\s*(.*)$/im);
   const returnPathRaw = extractHeader(/^Return-Path:\s*<?([^>\n]+)>?/im);
+  const subject = extractHeader(/^Subject:\s*(.*)$/im);
   
   const authResults = extractHeader(/^Authentication-Results:\s*(.*?)(?=\n\S|$)/is);
   const spfMatch = authResults.match(/spf=(\w+)/i) || headers.match(/spf=(\w+)/i);
@@ -40,6 +44,10 @@ const parsePayload = (headers: string, body: string, whitelists: WhitelistEntry[
   const dkimStatus = dkimMatch ? dkimMatch[1].toUpperCase() : 'NONE';
   const dmarcStatus = dmarcMatch ? dmarcMatch[1].toUpperCase() : 'NONE';
 
+  if (spfStatus === 'FAIL' || spfStatus === 'SOFTFAIL') { triggers.push('SPF_FAIL'); score += 2; }
+  if (dmarcStatus === 'FAIL') { triggers.push('DMARC_FAIL'); score += 3; }
+  if (dkimStatus === 'FAIL') { triggers.push('DKIM_FAIL'); score += 1; }
+
   const ipMatch = headers.match(/Received: from .*?\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\]/i);
   const senderIp = ipMatch ? ipMatch[1] : 'Unknown IP';
 
@@ -48,37 +56,71 @@ const parsePayload = (headers: string, body: string, whitelists: WhitelistEntry[
   const fromDomainMatch = fromRaw.match(emailRgx);
   if (fromDomainMatch) senderDomain = fromDomainMatch[1].toLowerCase();
 
+  // BEC Detection: Check if From domain mismatches Return-Path domain
+  const rpMatch = returnPathRaw.match(emailRgx);
+  const rpDomain = rpMatch ? rpMatch[1].toLowerCase() : '';
+  if (rpDomain && senderDomain !== 'unknown' && rpDomain !== senderDomain) {
+    triggers.push('IDENTITY_MISMATCH (BEC_INDICATOR)');
+    score += 3;
+  }
+
+  // Typosquatting Analysis (from notes)
+  const knownBrands = ['amazon', 'microsoft', 'outlook', 'dhl', 'paypal', 'apple', 'netflix', 'google', 'bank', 'secure'];
+  knownBrands.forEach(brand => {
+    if (senderDomain.includes(brand) && !senderDomain.endsWith(`.${brand}.com`) && !senderDomain.endsWith(`${brand}.com`)) {
+        if (!senderDomain.includes('email.' + brand) && !senderDomain.includes('mail.' + brand)) {
+            triggers.push(`TYPOSQUATTING_LIKELY (${brand})`);
+            score += 4;
+        }
+    }
+  });
+
+  // URL Extraction & Analysis
   const urlPattern = /https?:\/\/[^\s"'<>()]+/gi;
   const bodyUrls = body.match(urlPattern) || [];
   const headerUrls = headers.match(urlPattern) || [];
   const urls = Array.from(new Set([...bodyUrls, ...headerUrls]));
-
-  let verdict: Verdict = 'SUSPICIOUS';
   
+  urls.forEach(u => {
+    if (u.includes('bit.ly') || u.includes('t.co') || u.includes('tinyurl.com') || u.includes('shorturl.at')) {
+        triggers.push('URL_SHORTENER_DETECTED');
+        score += 2;
+    }
+    if (/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(u)) {
+        triggers.push('IP_ADDRESS_IN_URL');
+        score += 4;
+    }
+  });
+
+  // Tracking Pixels
+  if (body.includes('height="1"') || body.includes('width="1"') || body.includes('opacity:0')) {
+    triggers.push('TRACKING_PIXEL_INDICATOR');
+    score += 1;
+  }
+
+  // Urgency & Social Engineering (from notes)
+  const urgencyKeywords = ['urgent', 'important', 'action required', 'account suspended', 'locked', 'locked out', 'failed delivery', 'failed payment', 'verify', 'invoice', 'payroll'];
+  const textToScan = (subject + ' ' + body).toLowerCase();
+  urgencyKeywords.forEach(k => {
+    if (textToScan.includes(k)) {
+        triggers.push(`SOCIAL_ENG_KEYWORD (${k.toUpperCase()})`);
+        score += 1;
+    }
+  });
+
+  let verdict: Verdict = 'SAFE';
   const isWhitelisted = whitelists.some(w => w.domain.toLowerCase() === senderDomain);
   
   if (isWhitelisted) {
       verdict = 'SAFE';
   } else {
-      let maliciousPoints = 0;
-      if (spfStatus === 'FAIL' || spfStatus === 'SOFTFAIL') maliciousPoints++;
-      if (dmarcStatus === 'FAIL') maliciousPoints += 2;
-      
-      const rpMatch = returnPathRaw.match(emailRgx);
-      const rpDomain = rpMatch ? rpMatch[1].toLowerCase() : '';
-      if (rpDomain && rpDomain !== senderDomain) maliciousPoints += 2;
-      
-      const suspiciousBodyKeywords = ['urgent', 'password', 'verify', 'account suspended', 'login', 'click here'];
-      const bodyLower = body.toLowerCase();
-      if (suspiciousBodyKeywords.some(k => bodyLower.includes(k)) && urls.length > 0) {
-          maliciousPoints++;
-      }
-
-      if (maliciousPoints >= 2) verdict = 'MALICIOUS';
-      else if (maliciousPoints === 0 && spfStatus === 'PASS' && dkimStatus === 'PASS') verdict = 'SAFE';
+      if (score >= 5) verdict = 'MALICIOUS';
+      else if (score >= 2) verdict = 'SUSPICIOUS';
+      else if (score === 0 && dmarcStatus === 'PASS') verdict = 'SAFE';
+      else verdict = 'SUSPICIOUS';
   }
 
-  return { senderIp, fromRaw, returnPathRaw, spfStatus, dkimStatus, dmarcStatus, urls, verdict };
+  return { senderIp, fromRaw, returnPathRaw, spfStatus, dkimStatus, dmarcStatus, urls, verdict, triggers };
 };
 
 // --- Components ---
@@ -344,6 +386,19 @@ const AnalyzerView = () => {
                         <span className={`px-2 py-0.5 text-[9px] font-bold rounded-full ${result.extra.dmarcStatus === 'PASS' ? 'bg-primary/10 text-primary' : 'bg-secondary/10 text-secondary'}`}>{result.extra.dmarcStatus}</span>
                       </div>
                     </div>
+                  </div>
+                </div>
+
+                <div className="bg-surface-low p-6 border border-outline-variant/15">
+                  <label className="tactical-label block mb-4">Heuristic Triggers</label>
+                  <div className="flex flex-wrap gap-2">
+                    {result.extra.triggers && result.extra.triggers.length > 0 ? result.extra.triggers.map((t: string, idx: number) => (
+                      <span key={idx} className="px-2 py-1 bg-secondary/10 text-secondary border border-secondary/20 rounded-sm text-[10px] font-bold font-mono uppercase">
+                        {t}
+                      </span>
+                    )) : (
+                      <span className="text-[10px] font-mono text-slate-500">NO ADVERSE TRIGGERS DETECTED</span>
+                    )}
                   </div>
                 </div>
 
