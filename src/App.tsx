@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, createContext, useContext } from 'react';
 import { 
   Shield, 
   History, 
@@ -16,33 +16,158 @@ import {
   FileText,
   HelpCircle,
   AlertCircle,
-  Copy
+  Copy,
+  Volume2,
+  VolumeX,
+  X,
+  AlertTriangle,
+  CheckCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AnalysisRecord, WhitelistEntry, Verdict } from './types';
 import { MOCK_HISTORY, MOCK_WHITELIST } from './constants';
 
+// Helper functions for parsing
+const decodeEmailContent = (content: string): string => {
+  try {
+    // Handle quoted-printable encoding
+    let decoded = content.replace(/=\?utf-8\?B\?([^?]+)\?=/gi, (match, b64) => {
+      try {
+        return atob(b64);
+      } catch {
+        return match;
+      }
+    });
+
+    decoded = decoded.replace(/=([0-9A-F]{2})/g, (match, hex) => {
+      return String.fromCharCode(parseInt(hex, 16));
+    });
+
+    // Clean up extra whitespace and encoding markers
+    decoded = decoded
+      .replace(/=\r?\n/g, '')
+      .replace(/\r?\n\s*\r?\n/g, '\n\n')
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+    return decoded.trim();
+  } catch {
+    return content;
+  }
+};
+
+const extractKeyHeaders = (
+  headersRaw: string
+): {
+  from: string;
+  to: string;
+  returnPath: string;
+  subject: string;
+  date: string;
+  spf: string;
+  dkim: string;
+  dmarc: string;
+} => {
+  const extractHeader = (regex: RegExp) => {
+    const match = headersRaw.match(regex);
+    return match ? match[1].trim() : 'N/A';
+  };
+
+  return {
+    from: extractHeader(/^From:\s*(.*)$/im) || 'N/A',
+    to: extractHeader(/^To:\s*(.*)$/im) || 'N/A',
+    returnPath: extractHeader(/^Return-Path:\s*<?([^>\n]+)>?/im) || 'N/A',
+    subject: decodeEmailContent(extractHeader(/^Subject:\s*(.*)$/im) || 'N/A'),
+    date: extractHeader(/^Date:\s*(.*)$/im) || 'N/A',
+    spf: extractHeader(/spf=(\w+)/i) || 'NONE',
+    dkim: extractHeader(/dkim=(\w+)/i) || 'NONE',
+    dmarc: extractHeader(/dmarc=(\w+)/i) || 'NONE',
+  };
+};
+
+const extractBodyText = (bodyRaw: string): string => {
+  // Extract plain text part if multipart
+  let text = bodyRaw;
+
+  if (bodyRaw.includes('--')) {
+    const parts = bodyRaw.split(/--[a-zA-Z0-9]+/);
+    for (const part of parts) {
+      if (part.includes('Content-Type: text/plain')) {
+        const textStart = part.indexOf('\n\n');
+        if (textStart !== -1) {
+          text = part.substring(textStart + 2);
+        }
+        break;
+      }
+    }
+  }
+
+  // Decode the content
+  const decoded = decodeEmailContent(text);
+
+  // Extract only the main message (before unsubscribe, signatures, etc)
+  const lines = decoded.split('\n');
+  let mainContent = [];
+  let inSignature = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim().toLowerCase();
+
+    if (
+      trimmed.includes('unsubscribe') ||
+      trimmed.includes('here>') ||
+      inSignature
+    ) {
+      inSignature = true;
+      continue;
+    }
+
+    if (line.trim().length > 0 && !line.match(/^[\s\-=*]+$/)) {
+      mainContent.push(line);
+    }
+  }
+
+  return mainContent.join('\n').trim().substring(0, 500);
+};
+
+// --- Notification Context ---
+interface Notification {
+  id: string;
+  title: string;
+  message: string;
+  type: 'success' | 'warning' | 'error';
+  timestamp: number;
+}
+
+interface NotificationContextType {
+  notifications: Notification[];
+  addNotification: (title: string, message: string, type: 'success' | 'warning' | 'error') => void;
+  removeNotification: (id: string) => void;
+  soundEnabled: boolean;
+  setSoundEnabled: (enabled: boolean) => void;
+}
+
+const NotificationContext = createContext<NotificationContextType | undefined>(undefined);
+
+const useNotificationContext = () => {
+  const context = useContext(NotificationContext);
+  if (!context) {
+    throw new Error('useNotificationContext must be used within NotificationProvider');
+  }
+  return context;
+};
+
 const parsePayload = (headers: string, body: string, whitelists: WhitelistEntry[]) => {
   const triggers: string[] = [];
   let score = 0;
 
-  const extractHeader = (rgx: RegExp) => {
-    const match = headers.match(rgx);
-    return match ? match[1].trim() : 'Unknown';
-  };
-
-  const fromRaw = extractHeader(/^From:\s*(.*)$/im);
-  const returnPathRaw = extractHeader(/^Return-Path:\s*<?([^>\n]+)>?/im);
-  const subject = extractHeader(/^Subject:\s*(.*)$/im);
-  
-  const authResults = extractHeader(/^Authentication-Results:\s*(.*?)(?=\n\S|$)/is);
-  const spfMatch = authResults.match(/spf=(\w+)/i) || headers.match(/spf=(\w+)/i);
-  const dkimMatch = authResults.match(/dkim=(\w+)/i) || headers.match(/dkim=(\w+)/i);
-  const dmarcMatch = authResults.match(/dmarc=(\w+)/i) || headers.match(/dmarc=(\w+)/i);
-
-  const spfStatus = spfMatch ? spfMatch[1].toUpperCase() : 'NONE';
-  const dkimStatus = dkimMatch ? dkimMatch[1].toUpperCase() : 'NONE';
-  const dmarcStatus = dmarcMatch ? dmarcMatch[1].toUpperCase() : 'NONE';
+  // Extract key headers using improved parser
+  const parsed_headers = extractKeyHeaders(headers);
+  const fromRaw = parsed_headers.from;
+  const returnPathRaw = parsed_headers.returnPath;
+  const subject = parsed_headers.subject;
+  const spfStatus = parsed_headers.spf.toUpperCase();
+  const dkimStatus = parsed_headers.dkim.toUpperCase();
+  const dmarcStatus = parsed_headers.dmarc.toUpperCase();
 
   if (spfStatus === 'FAIL' || spfStatus === 'SOFTFAIL') { triggers.push('SPF_FAIL'); score += 2; }
   if (dmarcStatus === 'FAIL') { triggers.push('DMARC_FAIL'); score += 3; }
@@ -64,7 +189,7 @@ const parsePayload = (headers: string, body: string, whitelists: WhitelistEntry[
     score += 3;
   }
 
-  // Typosquatting Analysis (from notes)
+  // Typosquatting Analysis - ONLY if domain not verified legitimate
   const knownBrands = ['amazon', 'microsoft', 'outlook', 'dhl', 'paypal', 'apple', 'netflix', 'google', 'bank', 'secure'];
   knownBrands.forEach(brand => {
     if (senderDomain.includes(brand) && !senderDomain.endsWith(`.${brand}.com`) && !senderDomain.endsWith(`${brand}.com`)) {
@@ -98,13 +223,13 @@ const parsePayload = (headers: string, body: string, whitelists: WhitelistEntry[
     score += 1;
   }
 
-  // Urgency & Social Engineering (from notes)
+  // Urgency & Social Engineering - adjusted scoring
   const urgencyKeywords = ['urgent', 'important', 'action required', 'account suspended', 'locked', 'locked out', 'failed delivery', 'failed payment', 'verify', 'invoice', 'payroll'];
   const textToScan = (subject + ' ' + body).toLowerCase();
   urgencyKeywords.forEach(k => {
     if (textToScan.includes(k)) {
         triggers.push(`SOCIAL_ENG_KEYWORD (${k.toUpperCase()})`);
-        score += 1;
+        score += 0.5; // Lower weight - newsletters also use these
     }
   });
 
@@ -114,13 +239,26 @@ const parsePayload = (headers: string, body: string, whitelists: WhitelistEntry[
   if (isWhitelisted) {
       verdict = 'SAFE';
   } else {
-      if (score >= 5) verdict = 'MALICIOUS';
-      else if (score >= 2) verdict = 'SUSPICIOUS';
-      else if (score === 0 && dmarcStatus === 'PASS') verdict = 'SAFE';
+      if (score >= 6) verdict = 'MALICIOUS';
+      else if (score >= 3) verdict = 'SUSPICIOUS';
+      else if (score === 0 && (dmarcStatus === 'PASS' || spfStatus === 'PASS')) verdict = 'SAFE';
+      else if (score > 0 && score < 2) verdict = 'SAFE'; // Low score = safe
       else verdict = 'SUSPICIOUS';
   }
 
-  return { senderIp, fromRaw, returnPathRaw, spfStatus, dkimStatus, dmarcStatus, urls, verdict, triggers };
+  return { 
+    senderIp, 
+    fromRaw, 
+    returnPathRaw, 
+    spfStatus, 
+    dkimStatus, 
+    dmarcStatus, 
+    urls, 
+    verdict, 
+    triggers,
+    subject,
+    cleanBody: extractBodyText(body)
+  };
 };
 
 // --- Components ---
@@ -139,7 +277,7 @@ const Sidebar = ({ currentView, setView }: { currentView: string, setView: (v: s
           <Shield className="text-primary fill-primary/20" size={24} />
           <div>
             <div className="text-primary font-black font-display text-sm tracking-wider">PHISH_OPS</div>
-            <div className="text-[10px] text-slate-500 font-mono">V3.14-ALPHA</div>
+            <div className="text-[10px] text-slate-500 font-mono">ALPHA VERSION</div>
           </div>
         </div>
       </div>
@@ -184,38 +322,69 @@ const Sidebar = ({ currentView, setView }: { currentView: string, setView: (v: s
   );
 };
 
-const TopBar = () => (
-  <header className="bg-surface text-primary font-display tracking-tight w-full border-b border-outline-variant/15 flex justify-between items-center px-6 h-16 z-50 sticky top-0">
-    <div className="flex items-center gap-4">
-      <span className="text-xl font-bold tracking-widest uppercase">SENTINEL PHISH</span>
-    </div>
-    <div className="flex items-center gap-6">
-      <div className="hidden md:flex items-center bg-surface-low rounded-lg px-3 py-1.5 border border-outline-variant/30">
-        <Search className="text-slate-400 mr-2" size={14} />
-        <input 
-          className="bg-transparent border-none focus:ring-0 text-[10px] font-mono uppercase text-slate-200 placeholder-slate-500 w-48" 
-          placeholder="QUERY LOGS..." 
-          type="text"
-        />
-      </div>
+const TopBar = () => {
+  const { notifications, soundEnabled, setSoundEnabled } = useNotificationContext();
+  const [showSoundMenu, setShowSoundMenu] = useState(false);
+
+  return (
+    <header className="bg-surface text-primary font-display tracking-tight w-full border-b border-outline-variant/15 flex justify-between items-center px-6 h-16 z-50 sticky top-0">
       <div className="flex items-center gap-4">
-        <button className="text-slate-400 hover:bg-surface-high transition-colors duration-200 p-2 rounded-md">
+        <span className="text-xl font-bold tracking-widest uppercase">SENTINEL PHISH</span>
+      </div>
+      <div className="flex items-center gap-4 relative">
+        <button className="text-slate-400 hover:text-primary hover:bg-surface-high transition-colors duration-200 p-2 rounded-md relative">
           <Bell size={20} />
+          {notifications.length > 0 && (
+            <span className="absolute top-0 right-0 w-2 h-2 bg-secondary rounded-full animate-pulse"></span>
+          )}
         </button>
-        <button className="text-slate-400 hover:bg-surface-high transition-colors duration-200 p-2 rounded-md">
-          <Settings size={20} />
-        </button>
-        <div className="w-8 h-8 rounded-full overflow-hidden bg-surface-highest border border-primary/30">
-          <img 
-            alt="Analyst profile avatar" 
-            src="https://lh3.googleusercontent.com/aida-public/AB6AXuAaF63FBIqHIlnUmScKluHbyqPw_h2lTp238wuZkdQQw8fVjZebrvu74LElwbCkFOfcJRpq4ixmREy3O0D_oo6lPj-840-Fw8bNCGCTIV3yv2LNdiFJ0gZP1dIINE8PP0imVgW1dHGqgqqMLEZXMV1nJ7F7UVN_0AA5MO4MbeCi-JUKY3OyRcuTui4CglcWqVvnC7IhA35gqPN2s4s9mvHVEvIQEsIuv3XHWdrrJT7ctb6ZnxsO7ARs_hJWMm40SlinvmivG29yCUY"
-            referrerPolicy="no-referrer"
-          />
+
+        <div className="relative">
+          <button 
+            onClick={() => setShowSoundMenu(!showSoundMenu)}
+            className="text-slate-400 hover:text-primary hover:bg-surface-high transition-colors duration-200 p-2 rounded-md flex items-center gap-1.5"
+          >
+            {soundEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
+          </button>
+          
+          {showSoundMenu && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="absolute right-0 mt-2 bg-surface-low border border-outline-variant/30 rounded-md shadow-xl overflow-hidden"
+            >
+              <button
+                onClick={() => {
+                  setSoundEnabled(true);
+                  setShowSoundMenu(false);
+                }}
+                className={`w-full px-4 py-2.5 flex items-center gap-2 text-[10px] font-mono uppercase font-bold tracking-tight transition-colors ${
+                  soundEnabled ? 'bg-surface-high text-primary' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Volume2 size={14} />
+                SOUND ON
+              </button>
+              <button
+                onClick={() => {
+                  setSoundEnabled(false);
+                  setShowSoundMenu(false);
+                }}
+                className={`w-full px-4 py-2.5 flex items-center gap-2 text-[10px] font-mono uppercase font-bold tracking-tight transition-colors border-t border-outline-variant/10 ${
+                  !soundEnabled ? 'bg-surface-high text-primary' : 'text-slate-400 hover:text-slate-200 hover:bg-surface-high'
+                }`}
+              >
+                <VolumeX size={14} />
+                SOUND OFF
+              </button>
+            </motion.div>
+          )}
         </div>
       </div>
-    </div>
-  </header>
-);
+    </header>
+  );
+};
 
 const Footer = () => (
   <footer className="bg-surface text-primary font-mono text-[10px] uppercase w-full border-t border-outline-variant/15 fixed bottom-0 left-0 flex justify-between items-center px-6 py-2 z-50">
@@ -231,6 +400,46 @@ const Footer = () => (
   </footer>
 );
 
+// --- Notification Center ---
+
+const NotificationCenter = () => {
+  const { notifications, removeNotification } = useNotificationContext();
+
+  return (
+    <div className="fixed top-20 right-6 space-y-3 pointer-events-none z-[999]">
+      <AnimatePresence>
+        {notifications.map((notif) => (
+          <motion.div
+            key={notif.id}
+            initial={{ opacity: 0, x: 100, scale: 0.95 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, x: 100, scale: 0.95 }}
+            transition={{ duration: 0.3 }}
+            className={`pointer-events-auto px-4 py-3 rounded-sm border-l-4 backdrop-blur-sm flex items-center justify-between gap-3 ${
+              notif.type === 'success' 
+                ? 'bg-primary/10 border-primary text-primary' 
+                : notif.type === 'warning'
+                ? 'bg-tertiary/10 border-tertiary text-tertiary'
+                : 'bg-secondary/10 border-secondary text-secondary'
+            }`}
+          >
+            <div className="flex flex-col gap-0.5">
+              <p className="text-[10px] font-bold uppercase tracking-tight">{notif.title}</p>
+              <p className="text-[9px] opacity-80">{notif.message}</p>
+            </div>
+            <button
+              onClick={() => removeNotification(notif.id)}
+              className="flex-shrink-0 hover:opacity-70 transition-opacity"
+            >
+              <X size={14} />
+            </button>
+          </motion.div>
+        ))}
+      </AnimatePresence>
+    </div>
+  );
+};
+
 // --- Views ---
 
 const AnalyzerView = () => {
@@ -238,6 +447,29 @@ const AnalyzerView = () => {
   const [body, setBody] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<AnalysisRecord & { extra: any } | null>(null);
+  const { addNotification, soundEnabled } = useNotificationContext();
+
+  const playNotificationSound = () => {
+    if (soundEnabled) {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const now = audioContext.currentTime;
+      
+      const osc = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      
+      osc.connect(gain);
+      gain.connect(audioContext.destination);
+      
+      osc.frequency.setValueAtTime(800, now);
+      osc.frequency.setValueAtTime(1000, now + 0.1);
+      
+      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+      
+      osc.start(now);
+      osc.stop(now + 0.2);
+    }
+  };
 
   const handleAnalyze = () => {
     if (!headers || !body) return;
@@ -246,7 +478,7 @@ const AnalyzerView = () => {
       const whitelists = JSON.parse(localStorage.getItem('phishOpsWhitelists') || '[]');
       const parsed = parsePayload(headers, body, whitelists);
       
-      setResult({
+      const analysisRecord = {
         id: `SH-${Math.floor(Math.random() * 9000) + 1000}`,
         timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
         sender: parsed.fromRaw.slice(0, 50),
@@ -255,8 +487,21 @@ const AnalyzerView = () => {
         headers,
         body,
         extra: parsed
-      });
+      };
+      
+      setResult(analysisRecord);
       setIsAnalyzing(false);
+      
+      // Auto-save to history with 20-record limit
+      autoSaveToHistory(analysisRecord);
+      
+      // Trigger notification
+      playNotificationSound();
+      addNotification(
+        'ANALYSIS COMPLETE',
+        `Verdict: ${parsed.verdict}`,
+        parsed.verdict === 'MALICIOUS' ? 'error' : parsed.verdict === 'SAFE' ? 'success' : 'warning'
+      );
     }, 800);
   };
 
@@ -265,6 +510,104 @@ const AnalyzerView = () => {
     const currentList = JSON.parse(localStorage.getItem('phishOpsHistory') || '[]');
     localStorage.setItem('phishOpsHistory', JSON.stringify([result, ...currentList]));
     alert('ANALYSIS LOGGED TO HISTORY FILES.');
+  };
+
+  const autoSaveToHistory = (recordToSave: AnalysisRecord & { extra: any }) => {
+    try {
+      const currentList = JSON.parse(localStorage.getItem('phishOpsHistory') || '[]');
+      const updatedList = [recordToSave, ...currentList];
+      
+      // Limit to maximum 20 records - remove oldest if exceeds
+      if (updatedList.length > 20) {
+        updatedList.pop(); // Remove last (oldest) record
+      }
+      
+      localStorage.setItem('phishOpsHistory', JSON.stringify(updatedList));
+    } catch (error) {
+      console.warn('Failed to auto-save to history:', error);
+    }
+  };
+
+  const parseEMLFile = (content: string) => {
+    // Split headers and body by double newline
+    const parts = content.split(/\r?\n\r?\n/);
+    if (parts.length < 2) {
+      addNotification('IMPORT ERROR', 'Invalid EML format', 'error');
+      return;
+    }
+
+    const emlHeaders = parts[0];
+    const emlBody = parts.slice(1).join('\n\n');
+
+    setHeaders(emlHeaders);
+    setBody(emlBody);
+
+    // Auto-trigger analysis
+    setTimeout(() => {
+      if (emlHeaders && emlBody) {
+        setIsAnalyzing(true);
+        setTimeout(() => {
+          const whitelists = JSON.parse(localStorage.getItem('phishOpsWhitelists') || '[]');
+          const parsed = parsePayload(emlHeaders, emlBody, whitelists);
+          
+          const analysisRecord = {
+            id: `SH-${Math.floor(Math.random() * 9000) + 1000}`,
+            timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
+            sender: parsed.fromRaw.slice(0, 50),
+            subject: parsed.returnPathRaw.slice(0, 50),
+            verdict: parsed.verdict as Verdict,
+            headers: emlHeaders,
+            body: emlBody,
+            extra: parsed
+          };
+          
+          setResult(analysisRecord);
+          setIsAnalyzing(false);
+          
+          // Auto-save to history with 20-record limit
+          autoSaveToHistory(analysisRecord);
+          
+          playNotificationSound();
+          addNotification(
+            'EML IMPORTED & ANALYZED',
+            `Verdict: ${parsed.verdict}`,
+            parsed.verdict === 'MALICIOUS' ? 'error' : parsed.verdict === 'SAFE' ? 'success' : 'warning'
+          );
+        }, 800);
+      }
+    }, 100);
+  };
+
+  const handleFileSelect = (file: File) => {
+    if (!file.name.endsWith('.eml')) {
+      addNotification('INVALID FILE', 'Only .eml files are supported', 'error');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const content = e.target?.result as string;
+      parseEMLFile(content);
+    };
+    reader.onerror = () => {
+      addNotification('READ ERROR', 'Failed to read file', 'error');
+    };
+    reader.readAsText(file);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      handleFileSelect(files[0]);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
   };
 
   return (
@@ -281,6 +624,33 @@ const AnalyzerView = () => {
         </div>
         <h1 className="text-2xl font-bold font-display tracking-tight text-slate-100">Threat Analysis Canvas</h1>
         <p className="text-sm text-slate-400 max-w-2xl mt-1">SOC Level-1 Investigative Workspace. Input raw telemetry for heuristic evaluation.</p>
+      </div>
+
+      {/* EML IMPORT SECTION */}
+      <div 
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        className="bg-surface-low border-2 border-dashed border-primary/30 rounded-sm p-8 mb-6 transition-all hover:border-primary/60 hover:bg-surface-high/20 cursor-pointer relative group"
+      >
+        <input
+          id="eml-import"
+          type="file"
+          accept=".eml"
+          onChange={(e) => e.target.files && handleFileSelect(e.target.files[0])}
+          className="hidden"
+        />
+        <label htmlFor="eml-import" className="block cursor-pointer">
+          <div className="flex flex-col items-center justify-center gap-4">
+            <div className="text-primary/40 group-hover:text-primary/60 transition-colors">
+              <FileText size={48} />
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-bold text-primary/80 group-hover:text-primary transition-colors">DRAG & DROP EMAIL FILE HERE</p>
+              <p className="text-[10px] text-slate-500 mt-1">Or click to select .eml file</p>
+            </div>
+            <p className="text-[9px] font-mono text-slate-600">SUPPORTED FORMAT: .eml (RFC 5322)</p>
+          </div>
+        </label>
       </div>
 
       <div className="grid grid-cols-12 gap-6">
@@ -350,19 +720,30 @@ const AnalyzerView = () => {
                       </div>
                     </div>
                   </div>
-                  <div className="bg-surface-low p-6 border border-outline-variant/15 space-y-3 font-mono">
-                    <div className="flex justify-between border-b border-outline-variant/10 pb-1">
-                      <span className="text-[10px] text-slate-500">SENDER IP</span>
-                      <span className="text-xs text-slate-200">{result.extra.senderIp}</span>
+                  <div className="bg-surface-low p-6 border border-outline-variant/15 space-y-4 font-mono text-xs">
+                    <div className="border-l-2 border-primary/50 pl-4">
+                      <p className="text-[10px] text-slate-500 mb-1">SENDER IP</p>
+                      <p className="text-slate-200 break-all font-semibold">{result.extra.senderIp}</p>
                     </div>
-                    <div className="flex justify-between border-b border-outline-variant/10 pb-1">
-                      <span className="text-[10px] text-slate-500">RETURN-PATH</span>
-                      <span className="text-xs text-slate-200 truncate max-w-[150px]">{result.extra.returnPathRaw}</span>
+                    <div className="border-l-2 border-primary/50 pl-4">
+                      <p className="text-[10px] text-slate-500 mb-1">FROM</p>
+                      <p className="text-slate-200 break-all font-semibold">{result.extra.fromRaw}</p>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-[10px] text-slate-500">FROM</span>
-                      <span className="text-xs text-slate-200 truncate max-w-[150px]">{result.extra.fromRaw}</span>
+                    <div className="border-l-2 border-primary/50 pl-4">
+                      <p className="text-[10px] text-slate-500 mb-1">RETURN-PATH</p>
+                      <p className="text-slate-200 break-all font-semibold">{result.extra.returnPathRaw}</p>
                     </div>
+                    <div className="border-l-2 border-tertiary/50 pl-4">
+                      <p className="text-[10px] text-slate-500 mb-1">SUBJECT</p>
+                      <p className="text-slate-200 break-all">{result.extra.subject}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-surface-low p-6 border border-outline-variant/15">
+                  <label className="tactical-label block mb-4">Email Body Preview</label>
+                  <div className="bg-surface-highest/30 border border-outline-variant/10 rounded-sm p-4 text-[10px] font-mono text-slate-300 max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+                    {result.extra.cleanBody || 'No body content extracted'}
                   </div>
                 </div>
 
@@ -641,14 +1022,49 @@ const WhitelistsView = () => {
   );
 };
 
+
 // --- Main App ---
 
-export default function App() {
+const NotificationProvider = ({ children }: { children: React.ReactNode }) => {
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [soundEnabled, setSoundEnabled] = useState(() => {
+    const saved = localStorage.getItem('phishOpsSoundEnabled');
+    return saved ? JSON.parse(saved) : true;
+  });
+
+  const addNotification = (title: string, message: string, type: 'success' | 'warning' | 'error') => {
+    const id = Date.now().toString();
+    setNotifications(prev => [...prev, { id, title, message, type, timestamp: Date.now() }]);
+    
+    // Auto remove notification after 4 seconds
+    setTimeout(() => {
+      removeNotification(id);
+    }, 4000);
+  };
+
+  const removeNotification = (id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
+
+  const setSoundEnabledHandler = (enabled: boolean) => {
+    setSoundEnabled(enabled);
+    localStorage.setItem('phishOpsSoundEnabled', JSON.stringify(enabled));
+  };
+
+  return (
+    <NotificationContext.Provider value={{ notifications, addNotification, removeNotification, soundEnabled, setSoundEnabled: setSoundEnabledHandler }}>
+      {children}
+    </NotificationContext.Provider>
+  );
+};
+
+const AppContent = () => {
   const [view, setView] = useState('analyzer');
 
   return (
     <div className="flex flex-col min-h-screen">
       <TopBar />
+      <NotificationCenter />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar currentView={view} setView={setView} />
         <main className="flex-1 bg-surface overflow-y-auto p-6 pb-20 relative">
@@ -661,5 +1077,13 @@ export default function App() {
       </div>
       <Footer />
     </div>
+  );
+};
+
+export default function App() {
+  return (
+    <NotificationProvider>
+      <AppContent />
+    </NotificationProvider>
   );
 }
