@@ -1,0 +1,43 @@
+{
+  "brands": [
+    "amazon", "microsoft", "outlook", "dhl", "paypal", 
+    "apple", "netflix", "google", "udemy", "linkedin", "facebook", "instagram", "twitter", 
+    "bank", "zoom", "slack", "adobe", "spotify", "uber", "airbnb"
+  ],
+  "urgencyKeywords": [
+    "urgent action", "immediate attention", "account suspended", 
+    "locked out", "failed delivery", "failed payment", 
+    "unauthorized login", "security alert"
+  ],
+  "executiveKeywords": [
+    "ceo", "director", "cfo", "president", 
+    "manager", "chief", "executive", "payroll", "human resources", "compliance"
+  ],
+  "transactionalKeywords": [
+    "receipt", "order confirmation", "invoice payment", "shipping update", 
+    "password reset", "verification code", "booking details", "ticket"
+  ],
+  "marketingKeywords": [
+    "newsletter", "exclusive offer", "limited time", "unsubscribe", 
+    "promo code", "discount", "survey", "recommended for you"
+  ],
+  "malwareRegex": "(powershell|cmd\\.exe|wscript\\.|invoke-webrequest|invoke-expression|bypass|hidden|-enc|win32_process|wmi)",
+  "scamSextortion": [
+    "bitcoin", "webcam", "private video"
+  ],
+  "scamFinancial": [
+    "transferencia", "wire transfer", "bank transfer", "swift"
+  ],
+  "scam419": [
+    "herencia", "premio", "lottery", "inheritance"
+  ],
+  "malwareExtensions": [
+    ".zip", ".exe", ".docm"
+  ],
+  "financialInvoicing": [
+    "invoice", "factura", "payment"
+  ],
+  "accountTakeover": [
+    "verify your account", "account suspension", "reset password", "unauthorized access"
+  ]
+}

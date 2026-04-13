@@ -1,8 +1,8 @@
 // API Service Module for PhishShield Analyzer
 
-const VIRUSTOTAL_API_KEY = '2fe313ca57bb6a2962b1fd8f69daf40cac501bcdfde653295ec38c9011d77036';
-const URLSCAN_API_KEY = '019d72ab-c0cb-739c-8ad3-a5d8f7338d19';
-const ABUSEIPDB_API_KEY = '7b062e5395458559da6ee6b86dc81ce575b947a5b8b2c47752ccd63f9404417a88a431344d8258b0';
+const VIRUSTOTAL_API_KEY = import.meta.env.VITE_VIRUSTOTAL_API_KEY || '';
+const URLSCAN_API_KEY = import.meta.env.VITE_URLSCAN_API_KEY || '';
+const ABUSEIPDB_API_KEY = import.meta.env.VITE_ABUSEIPDB_API_KEY || '';
 
 export interface APIThreatResult {
   virusTotal?: {

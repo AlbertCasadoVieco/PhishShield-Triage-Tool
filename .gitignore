@@ -4,9 +4,15 @@ dist/
 coverage/
 .DS_Store
 *.log
-.env*
-!.env.example
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Personal Notes and Assistant Logic
+Apuntes/
+scratch_phishing/
 AGENTS.md
-
 Mis_Apuntes_Privados/
-
+.gemini/

@@ -8,6 +8,11 @@ export interface AnalysisRecord {
   verdict: Verdict;
   headers: string;
   body: string;
+  score?: number;
+  category?: string;
+  subcategory?: string;
+  triggers?: string[];
+  extra?: any;
 }
 
 export interface WhitelistEntry {
